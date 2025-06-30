@@ -1,0 +1,941 @@
+---
+title: "Tracking the Co-Variance of Words' Valence and Spatial Orientation in Human Ratings and the GloVe Model"
+author: "Sara Bartl"
+date: "2025-06-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this markdown we examine to what extent the valence of a word co-varies with the word's orientation along various spatial axes (vertical, horizontal, sagittal).
+We do this by using two types of data: ratings and word embeddings. 
+
+# Setup
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggrepel)
+library(readxl)
+```
+
+# Read in Data
+
+For the ratings, we work with 3 datasets:
+- Warriner, Kuperman and Brysbaert (2013), valence, 13915 words
+- Meteyard and Vigliocco (2009), vertical, horizontal and sagittal orientation, 299 words
+- Goodhew and Kidd (2016), vertical orientation, 498 words
+
+The dataset for the word embeddings was compiled for the purpose of this study. 
+The corresponding code can be found here https://colab.research.google.com/drive/11ZjRDVDbSqOdLqnxzDyK83C5MryYOYKe?usp=sharing
+```{r}
+# read in rating datasets
+war <- read_csv("../data/warriner_et_al.csv")
+gk <- read_csv("../data/goodhew_kidd.csv")
+mv <- read_csv("../data/meteyard_vigliocco.csv")
+
+# read in word embedding projections
+antonym_proj <- read_csv("../data/space_valence_ant_proj.csv")
+```
+
+# Pre-processing
+
+### Compute scores for words in Meteyard and Vigliocco dataset
+All datasets but the Meteyard and Vigliocco datset have a single rating per item, where the lower the rating, the more towards one pole, and the higher, the more towards the other. Meteyard and Vigliocco however obtained an individual rating for each pole (i.e. for vertical orientation for example, there is a up rating and a down rating for each word). 
+
+To make the dataset comparable with the others, we will compute the difference for each spatial orientation.
+```{r}
+mv_scores <- mv |>
+  mutate(
+    verti = as.numeric(upwrd) - as.numeric(dwnwrd),
+    hor = as.numeric(right) - as.numeric(left),
+    sag = as.numeric(away) - as.numeric(toward)) |>
+  rename(word = verb) |>
+  select(1, 21:23)
+```
+
+
+### Write a z-score function to standardise ratings and projections for better comparability
+```{r}
+z_score <- function(x) {
+  x = x - mean (x, na.rm = TRUE)
+  x = x / sd(x, na.rm = TRUE)
+  return(x)
+  }
+```
+
+### Standardise datasets using z_score function
+Here we standardise all the ratings and projections and ensure the datasets are otherwise comparable (changing all words to lowercase, re-naming the word column)
+```{r}
+war_z <- war |>
+  mutate(war_val_z = z_score(V.Mean.Sum)) |>
+  select(2, 66) |>
+  rename(word = Word) |>
+  mutate(word = tolower(word))
+
+gk_z <- gk |>
+  mutate(gk_vert_z = z_score(up_down)) |>
+  select(1, 3) |>
+  rename(word = Word) |>
+  mutate(word = tolower(word))
+
+mv_z <- mv_scores |>
+  mutate(
+    mv_vert_z = z_score(verti),
+    mv_hor_z = z_score(hor),
+    mv_sag_z = z_score(sag)) |>
+  select(1, 5:7)
+
+proj_z <- antonym_proj |>
+  mutate(
+    val_proj_z = z_score(valence_proj),
+    vert_proj_z = z_score(vertical_proj),
+    hor_proj_z = z_score(horizontal_proj),
+    sag_proj_z = z_score(towards_away_proj)) |>
+  rename(word = words) |>
+  select(2, 7:10)
+```
+
+### Join Data
+Now that all the datasets are standardised, we can join them into one dataframe, which we will need for running the models further down. 
+```{r}
+dfs <- list(war_z, gk_z, mv_z, proj_z)
+data_z <- reduce(dfs, full_join, by = 'word')
+
+```
+
+
+# Explore datasets
+
+Let's look at how the rating and projection data is distributed. 
+
+## Human Rating Datasets
+
+The Warriner Valence data looks reasonably bell shaped.
+```{r}
+war_z |>
+  ggplot(aes(war_val_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#899DA4') +
+  labs(title = 'Distribution of Warriner (2013) Valence Ratings', x = "Ratings (z_scores)", y = "Count") 
+
+#ggsave("../figures/war_val_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+
+```
+
+The distribution of the Goodhew and Kidd data is U shaped, showing that most of the data falls at the extremes.
+```{r}
+gk_z |>
+  ggplot(aes(gk_vert_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#899DA4') +
+  labs(title = 'Distribution of Goodhew and Kidd (2016) Vertical Ratings', x = "Ratings (z_scores)", y = "Count") 
+
+ggsave("../figures/gk_vert_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+
+```
+
+Vertical orientation in Meteyard and Vigliocco looks bell-shaped.
+```{r}
+mv_z |>
+  ggplot(aes(mv_vert_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#899DA4') +
+  labs(title = 'Distribution of Meteyard and Vigliocco (2009) Vertical Ratings', x = "Ratings (z_scores)", y = "Count") 
+
+ggsave("../figures/mv_vert_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+
+```
+
+Horizontal orientation in Meteyard and Vigliocco also looks normally distributed.
+```{r}
+mv_z |>
+  ggplot(aes(mv_hor_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#899DA4') +
+  labs(title = 'Distribution of Meteyard and Vigliocco (2009) Horizontal Ratings', x = "Ratings (z_scores)", y = "Count") 
+
+ggsave("../figures/mv_hor_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+
+```
+
+
+not sure about this one ----
+```{r}
+mv_z |>
+  ggplot(aes(mv_sag_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#899DA4') +
+  labs(title = 'Distribution of Meteyard and Vigliocco (2009) Sagittal Ratings', x = "Ratings (z_scores)", y = "Count") 
+
+ggsave("../figures/mv_sag_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+
+```
+
+
+## Projection Datasets
+
+The valence projections look normally distributed
+```{r}
+proj_z |>
+  ggplot(aes(val_proj_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#DC863B') +
+  labs(title = 'Distribution of GloVe Valence Projections', x = "Projections (z_scores)", y = "Count") 
+
+ggsave("../figures/val_proj_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+```
+
+The vertical projections look normally distributed
+```{r}
+proj_z |>
+  ggplot(aes(vert_proj_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#DC863B') +
+  labs(title = 'Distribution of GloVe Vertical Projections', x = "Projections (z_scores)", y = "Count") 
+
+ggsave("../figures/vert_proj_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+```
+
+The horizontal projections look normally distributed
+```{r}
+proj_z |>
+  ggplot(aes(hor_proj_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#DC863B') +
+  labs(title = 'Distribution of GloVe Horizontal Projections', x = "Projections (z_scores)", y = "Count") 
+
+ggsave("../figures/hor_proj_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+```
+
+
+The sagittal projections look normally distributed
+```{r}
+proj_z |>
+  ggplot(aes(sag_proj_z)) +
+  geom_histogram(binwidth = 0.05, fill = '#DC863B') +
+  labs(title = 'Distribution of GloVe Sagittal Projections', x = "Projections (z_scores)", y = "Count") 
+
+ggsave("../figures/sag_proj_hist.tiff", width = 10, height = 6, dpi = 300, device = "tiff")
+```
+
+
+# Models and Visualisations
+
+Before we create the visualisations, we are going to define a function for sampling some words to display in each of them. 
+In each, we want to show  randomly selected outlier words from each quartile. The get_label_words function does that.
+
+```{t}
+get_label_words <- function(data, col1, col2, n_2_3 = 2, n_1_4 = 5) {
+  seed <- 234
+  col1 <- ensym(col1)
+  col2 <- ensym(col2)
+
+  # Drop NA in col1 and col2 for consistent processing
+  clean_data <- data %>%
+    filter(!is.na(!!col1), !is.na(!!col2))
+
+  # Get quartiles
+  quantiles <- quantile(pull(clean_data, !!col1), probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+
+  # Sample 5 from each quartile
+  set.seed(seed)
+  random_quartile_words_col1 <- bind_rows(
+    clean_data %>% filter(!!col1 >= quantiles[1], !!col1 <= quantiles[2]) %>% slice_sample(n = n_1_4),
+    clean_data %>% filter(!!col1 > quantiles[2], !!col1 <= quantiles[3]) %>% slice_sample(n = n_2_3),
+    clean_data %>% filter(!!col1 > quantiles[3], !!col1 <= quantiles[4]) %>% slice_sample(n = n_2_3),
+    clean_data %>% filter(!!col1 > quantiles[4], !!col1 <= quantiles[5]) %>% slice_sample(n = n_1_4)
+  )
+  
+  
+  # Get quartiles
+  quantiles <- quantile(pull(clean_data, !!col2), probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+  
+  set.seed(seed)
+  random_quartile_words_col2 <- bind_rows(
+    clean_data %>% filter(!!col2 >= quantiles[1], !!col2 <= quantiles[2]) %>% slice_sample(n = n_1_4),
+    clean_data %>% filter(!!col2 > quantiles[2], !!col2 <= quantiles[3]) %>% slice_sample(n = n_2_3),
+    clean_data %>% filter(!!col2 > quantiles[3], !!col2 <= quantiles[4]) %>% slice_sample(n = n_2_3),
+    clean_data %>% filter(!!col2 > quantiles[4], !!col2 <= quantiles[5]) %>% slice_sample(n = n_1_4)
+  )
+
+
+  # Combine
+  label_words <- full_join(random_quartile_words_col1, random_quartile_words_col2)
+
+  return(label_words)
+}
+```
+Now we can visualise these relationships
+
+## Valence and Vertical Orientation
+
+Vertical orientation is the prominent association that is generally attested for this metaphor. For this spatial orientation, we have two datasets. We will look at both in turn.
+
+### Meteyard and Vigliocco 
+
+#### Visualisation
+```{r}
+# get sample of labelled words
+label_words_1 <- get_label_words(data_z, mv_vert_z, war_val_z, n_1_4 = 5, n_2_3 = 5)
+
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(mv_vert_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(mv_vert_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = label_words_1,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Up-Down (Meteyard and Vigliocco)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Vertical Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$mv_vert_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_vert_ratings1.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+
+```
+
+#### Linear Model
+```{r}
+mv_vert_mdl = lm(war_val_z ~ mv_vert_z, data_z)
+summary(mv_vert_mdl)
+```
+
+
+
+
+### Goodhew and Kidd
+
+#### Visualisation
+
+```{r}
+# get sample of labelled words
+label_words_2 <- get_label_words(data_z, gk_vert_z, war_val_z, n_1_4 = 5, n_2_3 = 5)
+
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(gk_vert_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(gk_vert_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = label_words_2,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Up-Down (Goodhew and Kidd)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Vertical Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$gk_vert_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_vert_ratings2.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+```
+
+
+#### Linear Model
+```{r}
+gk_vert_mdl = lm(war_val_z ~ gk_vert_z, data_z)
+summary(gk_vert_mdl)
+```
+
+
+## Valence and Horizontal Orientation
+
+#### Visualisation
+```{r}
+# get sample of labelled words
+label_words_3 <- get_label_words(data_z, mv_hor_z, war_val_z, n_1_4 = 5, n_2_3 = 5)
+
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(mv_hor_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(mv_hor_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = label_words_3,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Left-Right (Meteyard and Vigliocco)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Horizontal Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$mv_hor_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_hor_ratings.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+```
+
+
+#### Linear Model
+```{r}
+mv_hor_mdl = lm(war_val_z ~ mv_hor_z, data_z)
+summary(mv_hor_mdl)
+```
+
+
+
+## Valence and Sagittal Orientation
+
+#### Visualisation
+```{r}
+# get sample of labelled words
+label_words_4 <- get_label_words(data_z, mv_sag_z, war_val_z, n_1_4 = 5, n_2_3 = 5)
+
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(mv_sag_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(mv_sag_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = label_words_4,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Away-Towards (Meteyard and Vigliocco)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Sagittal Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$mv_sag_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_sag_ratings.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+```
+
+#### Linear Model
+```{r}
+mv_sag_mdl = lm(war_val_z ~ mv_sag_z, data_z)
+summary(mv_sag_mdl)
+```
+
+
+
+## GloVe Model
+
+There are a lot of embeddings in the GloVe model. If we look at the data, we can see that it has almost 2 million rows, that is two million embeddings. 
+```{r}
+nrow(proj_z)
+```
+
+This is too much for meaningfully visualising the data. But even aside from that, the corpus this model is trained on is a lot noisier than most corpus linguists would be used to, because it's essentially an online data dump that has not been cleaned (and was automatically tokenised). Let's take a look at a random sample to illustrate this
+```{r}
+# set seed for reproducibility
+set.seed(234)
+proj_z |>
+  slice_sample(n=20) 
+```
+
+We have lexical items we might expect, such as reversibility or mailbag, lexical items we might not have expected, but would include in a corpus, like the Swiss municipality of düdingen. But there are also lexical items we might not recognise as such, like  interval 232-235 or 77f. 
+
+One of the downsides of this data is that we do not have frequency data for this particular corpus. But, we can use frequency information from another corpus to reduce the embedding dataset to more frequent and meaningful lexical items. For this we use the freely available list of different word forms from the SUBTLEX dataset. This has the additional advantage of providing frequency based information about how likely a form is to be a certain PoS.
+
+In total, these are roughly 74.000 words. 
+
+```{r}
+subtlex <- read_csv("../data/SUBTLEX_US_with_POS.csv")
+nrow(subtlex)
+```
+
+For now, we are using the words in the subtlex dataset as well as words from any of the rating datasets to filter the almost two million embeddings. 
+```{r}
+data_z_subtlex <- data_z |>
+  filter(data_z$word %in% subtlex$Word | data_z$word %in% mv_z$word | 
+           data_z$word %in% gk_z$word | data_z$word %in% war_z$word)
+
+nrow(data_z_subtlex)
+```
+
+
+### Valence and Vertical Orientation
+
+#### Visualisation
+```{r}
+# get sample of labelled words
+label_words_5 <- get_label_words(data_z_subtlex, vert_proj_z, val_proj_z, n_1_4 = 15, n_2_3 = 5)
+
+# calculate how many words are in the plot+
+n_words <- data_z_subtlex |>
+  filter(!is.na(vert_proj_z), !is.na(val_proj_z)) |>
+  nrow()
+
+label_words_5 <- data_z_subtlex |>
+  filter(word %in% c("peak","grave", "sun","cockroach", "cemetary", "sad", "happy", "great", "rainbow", "bury"))
+
+data_z_subtlex |>
+  ggplot(aes(vert_proj_z, val_proj_z)) +
+  geom_smooth(method = "lm", color = '#C93312') +
+  geom_point(size = 0.8, alpha = 0.1, color = '#DC863B') +
+  coord_cartesian(
+    xlim = c(min(data_z_subtlex$vert_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$vert_proj_z, na.rm = TRUE)),
+    ylim = c(min(data_z_subtlex$val_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$val_proj_z, na.rm = TRUE))) +
+  geom_text_repel(
+    data = label_words_5,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Up-Down", y = "Valence",
+    title = paste0(n_words, " Projections for Valence and Vertical Orientation (r = ", 
+                   round(cor(data_z_subtlex$val_proj_z, data_z_subtlex$vert_proj_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_vert_proj.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+
+```
+
+#### Linear Model
+```{r}
+vert_proj_mdl = lm(val_proj_z ~ vert_proj_z, data_z_subtlex)
+summary(vert_proj_mdl)
+```
+
+
+What if we only look at the words from Goodhew and Kidd?
+The correlation increases in comparison to using all the words. That's likely because the words rated in Goodhew and Kidd seem to have a clearer signal along the vertical axis.
+```{r}
+gk_words_proj <- data_z_subtlex |>
+  filter(data_z_subtlex$word %in% gk_z$word)
+
+
+label_words_x <- get_label_words(gk_words_proj, vert_proj_z, val_proj_z, n_1_4 = 10, n_2_3 = 3)
+
+# calculate how many words are in the plot+
+n_words <- gk_words_proj |>
+  filter(!is.na(vert_proj_z), !is.na(val_proj_z)) |>
+  nrow()
+
+gk_words_proj |>
+  ggplot(aes(vert_proj_z, val_proj_z)) +
+  geom_smooth(method = "lm", color = '#C93312') +
+  geom_point(size = 0.8, alpha = 0.5, color = '#DC863B') +
+  geom_text_repel(
+    data = label_words_x,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Up-Down", y = "Valence",
+    title = paste0(n_words, " Projections for Valence and Vertical Orientation for GK Words(r = ", 
+                   round(cor(gk_words_proj$val_proj_z, gk_words_proj$vert_proj_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+
+```
+
+
+### Valence and Horizontal Orientation
+
+#### Visualisation
+```{r}
+# get sample of labelled words
+label_words_6 <- get_label_words(data_z_subtlex, hor_proj_z, val_proj_z, n_1_4 = 15, n_2_3 = 5)
+
+# calculate how many words are in the plot+
+n_words <- data_z_subtlex |>
+  filter(!is.na(hor_proj_z), !is.na(val_proj_z)) |>
+  nrow()
+
+data_z_subtlex |>
+  ggplot(aes(hor_proj_z, val_proj_z)) +
+  geom_smooth(method = "lm", color = '#C93312') +
+  geom_point(size = 0.8, alpha = 0.1, color = '#DC863B') +
+  coord_cartesian(
+    xlim = c(min(data_z_subtlex$hor_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$hor_proj_z, na.rm = TRUE)),
+    ylim = c(min(data_z_subtlex$val_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$val_proj_z, na.rm = TRUE))) +
+  geom_text_repel(
+    data = label_words_6,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Left-Right", y = "Valence",
+    title = paste0(n_words, " Projections for Valence and Horizontal Orientation (r = ", 
+                   round(cor(data_z_subtlex$val_proj_z, data_z_subtlex$hor_proj_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_hor_proj.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+
+```
+
+
+#### Linear Model
+```{r}
+hor_proj_mdl = lm(val_proj_z ~ hor_proj_z, data_z_subtlex)
+summary(hor_proj_mdl)
+```
+
+
+### Valence and Sagittal Orientation
+
+#### Visualisation
+```{r}
+# get sample of labelled words
+label_words_7 <- get_label_words(data_z_subtlex, sag_proj_z, val_proj_z, n_1_4 = 15, n_2_3 = 5)
+
+# calculate how many words are in the plot+
+n_words <- data_z_subtlex |>
+  filter(!is.na(sag_proj_z), !is.na(val_proj_z)) |>
+  nrow()
+
+data_z_subtlex |>
+  ggplot(aes(sag_proj_z, val_proj_z)) +
+  geom_smooth(method = "lm", color = '#C93312') +
+  geom_point(size = 0.8, alpha = 0.1, color = '#DC863B') +
+  coord_cartesian(
+    xlim = c(min(data_z_subtlex$sag_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$sag_proj_z, na.rm = TRUE)),
+    ylim = c(min(data_z_subtlex$val_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$val_proj_z, na.rm = TRUE))) +
+  geom_text_repel(
+    data = label_words_7,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Away-Toward", y = "Valence",
+    title = paste0(n_words, " Projections for Valence and Sagittal Orientation (r = ", 
+                   round(cor(data_z_subtlex$val_proj_z, data_z_subtlex$sag_proj_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_sag_proj.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+```
+
+#### Linear Model
+```{r}
+sag_proj_mdl = lm(val_proj_z ~ sag_proj_z, data_z_subtlex)
+summary(sag_proj_mdl)
+```
+
+
+Visualisations for presentation where all plots have the same words
+```{r}
+new_words <- get_label_words(data_z, war_val_z, gk_vert_z, n_1_4 = 50, n_2_3 = 5)
+
+#words from new_words that are in all datasets
+all_dataset_words <- new_words |>
+  filter(if_all(everything(), ~ !is.na(.)))
+
+set.seed(3453)
+non_mv_words_sample <- new_words |>
+  filter(is.na(mv_vert_z)) |>
+  sample_n(25)
+
+plot_words <- rbind(all_dataset_words, non_mv_words_sample)
+```
+
+#### Visualisation
+```{r}
+
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(mv_vert_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(mv_vert_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = plot_words,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Up-Down (Meteyard and Vigliocco)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Vertical Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$mv_vert_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_vert_ratings_shared_words.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+
+```
+
+### Goodhew and Kidd
+
+#### Visualisation
+
+```{r}
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(gk_vert_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(gk_vert_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = plot_words,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Up-Down (Goodhew and Kidd)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Vertical Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$gk_vert_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_vert_ratings_2shared_words.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+```
+
+
+## Valence and Horizontal Orientation
+
+#### Visualisation
+```{r}
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(mv_hor_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(mv_hor_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = plot_words,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Left-Right (Meteyard and Vigliocco)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Horizontal Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$mv_hor_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_hor_ratings_shared_words.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+```
+
+
+## Valence and Sagittal Orientation
+
+#### Visualisation
+```{r}
+# calculate how many words are in the plot+
+n_words <- data_z |>
+  filter(!is.na(mv_sag_z), !is.na(war_val_z)) |>
+  nrow()
+
+data_z |>
+  ggplot(aes(mv_sag_z, war_val_z)) +
+  geom_smooth(method = "lm", color = "#2c7c94") +
+  geom_point(size = 0.8, alpha = 0.7, color = "#203D57") +
+  geom_text_repel(
+    data = plot_words,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Away-Towards (Meteyard and Vigliocco)", y = "Valence (Warriner)",
+    title = paste0(n_words, " Ratings for Valence and Sagittal Orientation (r = ", 
+                   round(cor(data_z$war_val_z, data_z$mv_sag_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_sag_ratings_shared_words.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+```
+ 
+
+### Valence and Vertical Orientation GloVe
+
+```{r}
+# calculate how many words are in the plot+
+n_words <- data_z_subtlex |>
+  filter(!is.na(vert_proj_z), !is.na(val_proj_z)) |>
+  nrow()
+
+
+data_z_subtlex |>
+  ggplot(aes(vert_proj_z, val_proj_z)) +
+  geom_smooth(method = "lm", color = '#C93312') +
+  geom_point(size = 0.8, alpha = 0.1, color = '#DC863B') +
+  coord_cartesian(
+    xlim = c(min(data_z_subtlex$vert_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$vert_proj_z, na.rm = TRUE)),
+    ylim = c(min(data_z_subtlex$val_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$val_proj_z, na.rm = TRUE))) +
+  geom_text_repel(
+    data = plot_words,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Up-Down", y = "Valence",
+    title = paste0(n_words, " Projections for Valence and Vertical Orientation (r = ", 
+                   round(cor(data_z_subtlex$val_proj_z, data_z_subtlex$vert_proj_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_vert_proj_shared_words.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+
+```
+
+
+
+### Valence and Horizontal Orientation
+
+#### Visualisation
+```{r}
+# calculate how many words are in the plot+
+n_words <- data_z_subtlex |>
+  filter(!is.na(hor_proj_z), !is.na(val_proj_z)) |>
+  nrow()
+
+data_z_subtlex |>
+  ggplot(aes(hor_proj_z, val_proj_z)) +
+  geom_smooth(method = "lm", color = '#C93312') +
+  geom_point(size = 0.8, alpha = 0.1, color = '#DC863B') +
+  coord_cartesian(
+    xlim = c(min(data_z_subtlex$hor_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$hor_proj_z, na.rm = TRUE)),
+    ylim = c(min(data_z_subtlex$val_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$val_proj_z, na.rm = TRUE))) +
+  geom_text_repel(
+    data = plot_words,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Left-Right", y = "Valence",
+    title = paste0(n_words, " Projections for Valence and Horizontal Orientation (r = ", 
+                   round(cor(data_z_subtlex$val_proj_z, data_z_subtlex$hor_proj_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_hor_proj_shared_words.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+
+```
+
+### Valence and Sagittal Orientation
+
+#### Visualisation
+```{r}
+
+# calculate how many words are in the plot+
+n_words <- data_z_subtlex |>
+  filter(!is.na(sag_proj_z), !is.na(val_proj_z)) |>
+  nrow()
+
+data_z_subtlex |>
+  ggplot(aes(sag_proj_z, val_proj_z)) +
+  geom_smooth(method = "lm", color = '#C93312') +
+  geom_point(size = 0.8, alpha = 0.1, color = '#DC863B') +
+  coord_cartesian(
+    xlim = c(min(data_z_subtlex$sag_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$sag_proj_z, na.rm = TRUE)),
+    ylim = c(min(data_z_subtlex$val_proj_z, na.rm = TRUE), 
+             max(data_z_subtlex$val_proj_z, na.rm = TRUE))) +
+  geom_text_repel(
+    data = plot_words,
+    aes(label = word),
+    size = 5,
+    color = "black",
+    alpha = 0.8
+  ) +
+  labs(
+    x = "Away-Toward", y = "Valence",
+    title = paste0(n_words, " Projections for Valence and Sagittal Orientation (r = ", 
+                   round(cor(data_z_subtlex$val_proj_z, data_z_subtlex$sag_proj_z, use = "complete.obs"),2), ")")) +
+  theme(plot.title = element_text(size = 22),
+            axis.title.x = element_text(size = 18),
+           axis.title.y = element_text(size = 18))
+
+ggsave("../figures/val_sag_proj_shared_words.tiff", width = 10, height = 10, dpi = 300, device = "tiff")
+
+```
+
+The metaphoric mapping between valence and vertical orientation exists both in how people rate words in isolation and in how people use words in writing language. 
+
+
+
+'#DC863B'
+'#C93312'
+
+
+'#899DA4'
+'#2c7c94'
+'#C93312'
+'#FAEFD1'
+'#DC863B'
+'#203D57'
+
+
